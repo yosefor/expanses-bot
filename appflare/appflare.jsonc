@@ -1,0 +1,99 @@
+{
+  // Draft entry for the Appflare catalog (https://github.com/appflare/catalog).
+  // It goes in that repo as apps/expenses-bot/appflare.jsonc. Before submitting, pin
+  // `source` to a pushed commit and add a "license" (SPDX id).
+  "$schema": "https://appflare.github.io/catalog/schema/v1.json",
+  "slug": "expenses-bot",
+  "name": "Expenses Bot",
+  "summary": "A WhatsApp bot for tracking expenses: send an amount and a reason, get a ✅, and ask for a monthly summary. Family members can share one account.",
+  "tagline": "Track household expenses by sending WhatsApp messages",
+  "features": [
+    "Record an expense by sending a message like 50 groceries",
+    "Get a summary of all expenses by month, with totals",
+    "Share one account with family members through invite codes",
+    "Limit the bot to the phone numbers you choose",
+    "Connect the WhatsApp webhook from a setup page, in one click"
+  ],
+  "repo": "yosefor/expanses-bot",
+  "license": "MIT",
+  "categories": ["bots", "productivity"],
+  "maintainers": ["yosefor"],
+  "source": { "ref": "main", "sha": "0000000000000000000000000000000000000000" },
+  "install": {
+    "packageManager": "npm",
+    "wranglerConfig": "wrangler.jsonc",
+    // "/" is the setup page. It answers 401 until you sign in with the admin password.
+    "health": { "path": "/" }
+  },
+  // One Worker, one D1 database and a daily cron. All within the free plan.
+  "plan": "free",
+  "secrets": [
+    {
+      "name": "WHATSAPP_TOKEN",
+      "label": "WhatsApp access token",
+      "help": "A permanent token: Meta Business settings → System users → Generate token, with the whatsapp_business_messaging and whatsapp_business_management permissions.",
+      "link": { "label": "System users", "url": "https://business.facebook.com/settings/system-users" }
+    },
+    {
+      "name": "WHATSAPP_PHONE_NUMBER_ID",
+      "label": "Phone number ID",
+      "help": "In your Meta app: WhatsApp → API Setup. This is the ID, not the phone number.",
+      "link": { "label": "Meta apps", "url": "https://developers.facebook.com/apps" }
+    },
+    {
+      "name": "WHATSAPP_APP_SECRET",
+      "label": "App secret",
+      "help": "In your Meta app: App settings → Basic. The bot uses it to check that webhooks really come from Meta.",
+      "link": { "label": "Meta apps", "url": "https://developers.facebook.com/apps" }
+    },
+    {
+      "name": "WHATSAPP_VERIFY_TOKEN",
+      "label": "Webhook verify token",
+      "help": "Meta sends it back when it verifies the webhook. The setup page uses it for you.",
+      "generate": "password"
+    },
+    {
+      "name": "ADMIN_PASSWORD",
+      "label": "Setup page password",
+      "help": "Signs you in to the setup page (any user name). Copy it now.",
+      "generate": "password"
+    }
+  ],
+  "vars": [
+    {
+      "name": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+      "label": "WhatsApp Business Account ID",
+      "help": "In your Meta app: WhatsApp → API Setup. With it, the setup page also subscribes your app to the account.",
+      "optional": true
+    },
+    {
+      "name": "ALLOWED_NUMBERS",
+      "label": "Allowed numbers",
+      "help": "Comma-separated numbers that may use the bot, in international format without +, for example 972501234567. Numbers that join with an invite code are allowed too. Empty lets anyone use it.",
+      "optional": true
+    },
+    {
+      "name": "BOT_PHONE_NUMBER",
+      "label": "Bot phone number",
+      "help": "The bot's own number, digits only. Invite messages include a wa.me link to it.",
+      "optional": true
+    },
+    {
+      "name": "TIMEZONE",
+      "label": "Time zone",
+      "help": "Used to group expenses by month, for example Asia/Jerusalem or Europe/London.",
+      "default": "Asia/Jerusalem"
+    }
+  ],
+  "openPath": "/",
+  "postInstall": [
+    {
+      "type": "markdown",
+      "content": "Open {{appUrl}} and sign in with any user name and the setup page password. Check that every setting is green, then click **Connect webhook**: it points your WhatsApp number at {{appUrl}}/webhook."
+    },
+    {
+      "type": "markdown",
+      "content": "Send the bot `עזרה` (help) from WhatsApp to see the commands. The bot replies in Hebrew."
+    }
+  ]
+}

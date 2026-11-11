@@ -1,0 +1,11 @@
+# Local settings for `npm run dev:worker` (copy to .dev.vars). In production these are Worker secrets.
+WHATSAPP_TOKEN=EAAG...
+WHATSAPP_PHONE_NUMBER_ID=123456789012345
+WHATSAPP_APP_SECRET=abc123
+WHATSAPP_VERIFY_TOKEN=change-me
+# Password for the setup page at / (any user name).
+ADMIN_PASSWORD=change-me
+# Optional
+WHATSAPP_BUSINESS_ACCOUNT_ID=
+ALLOWED_NUMBERS=
+BOT_PHONE_NUMBER=

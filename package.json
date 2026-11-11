@@ -1,0 +1,29 @@
+{
+  "name": "expenses-bot",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "WhatsApp bot that collects expenses: send '<amount> <reason>', get a ✅ reaction; send 'סיכום' for a summary.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/index.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env --watch src/index.ts",
+    "typecheck": "tsc",
+    "test": "node --disable-warning=ExperimentalWarning --test \"src/**/*.test.ts\"",
+    "test:firestore": "firebase emulators:exec --only firestore --project demo-expenses \"npm test\"",
+    "dev:worker": "wrangler d1 migrations apply DB --local && wrangler dev",
+    "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.160.1"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.11.1",
+    "firebase-admin": "^14.5.0"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "expenses-bot",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // The database is created on the first deploy (no database_id needed).
+  "d1_databases": [{ "binding": "DB", "database_name": "expenses-bot", "migrations_dir": "migrations" }],
+
+  // Deletes old webhook dedupe records and expired invite codes.
+  "triggers": { "crons": ["17 3 * * *"] },
+
+  // Defaults. Settings changed in the Cloudflare dashboard survive redeploys.
+  "keep_vars": true,
+  "vars": {
+    "TIMEZONE": "Asia/Jerusalem",
+    "GRAPH_API_VERSION": "v23.0",
+    "REACTION_EMOJI": "✅"
+  },
+  "secrets": {
+    "required": ["WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "ADMIN_PASSWORD"]
+  }
+}
