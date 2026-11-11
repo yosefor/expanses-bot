@@ -25,5 +25,15 @@
   "dependencies": {
     "@vercel/functions": "^3.11.1",
     "firebase-admin": "^14.5.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "Choose a password for your bot's setup page (בחרו סיסמה לדף ההגדרות של הבוט). After deploying, open the Worker's address and sign in with it."
+      },
+      "DB": {
+        "description": "Your expenses are stored here."
+      }
+    }
   }
 }

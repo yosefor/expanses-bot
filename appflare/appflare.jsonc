@@ -12,7 +12,7 @@
     "Get a summary of all expenses by month, with totals",
     "Share one account with family members through invite codes",
     "Limit the bot to the phone numbers you choose",
-    "Connect the WhatsApp webhook from a setup page, in one click"
+    "Set everything up from a guided page that checks each step with Meta"
   ],
   "repo": "yosefor/expanses-bot",
   "license": "MIT",
@@ -27,31 +27,8 @@
   },
   // One Worker, one D1 database and a daily cron. All within the free plan.
   "plan": "free",
+  // The WhatsApp details are entered on the setup page (stored in D1), which checks each one with Meta.
   "secrets": [
-    {
-      "name": "WHATSAPP_TOKEN",
-      "label": "WhatsApp access token",
-      "help": "A permanent token: Meta Business settings → System users → Generate token, with the whatsapp_business_messaging and whatsapp_business_management permissions.",
-      "link": { "label": "System users", "url": "https://business.facebook.com/settings/system-users" }
-    },
-    {
-      "name": "WHATSAPP_PHONE_NUMBER_ID",
-      "label": "Phone number ID",
-      "help": "In your Meta app: WhatsApp → API Setup. This is the ID, not the phone number.",
-      "link": { "label": "Meta apps", "url": "https://developers.facebook.com/apps" }
-    },
-    {
-      "name": "WHATSAPP_APP_SECRET",
-      "label": "App secret",
-      "help": "In your Meta app: App settings → Basic. The bot uses it to check that webhooks really come from Meta.",
-      "link": { "label": "Meta apps", "url": "https://developers.facebook.com/apps" }
-    },
-    {
-      "name": "WHATSAPP_VERIFY_TOKEN",
-      "label": "Webhook verify token",
-      "help": "Meta sends it back when it verifies the webhook. The setup page uses it for you.",
-      "generate": "password"
-    },
     {
       "name": "ADMIN_PASSWORD",
       "label": "Setup page password",
@@ -60,24 +37,6 @@
     }
   ],
   "vars": [
-    {
-      "name": "WHATSAPP_BUSINESS_ACCOUNT_ID",
-      "label": "WhatsApp Business Account ID",
-      "help": "In your Meta app: WhatsApp → API Setup. With it, the setup page also subscribes your app to the account.",
-      "optional": true
-    },
-    {
-      "name": "ALLOWED_NUMBERS",
-      "label": "Allowed numbers",
-      "help": "Comma-separated numbers that may use the bot, in international format without +, for example 972501234567. Numbers that join with an invite code are allowed too. Empty lets anyone use it.",
-      "optional": true
-    },
-    {
-      "name": "BOT_PHONE_NUMBER",
-      "label": "Bot phone number",
-      "help": "The bot's own number, digits only. Invite messages include a wa.me link to it.",
-      "optional": true
-    },
     {
       "name": "TIMEZONE",
       "label": "Time zone",
@@ -89,7 +48,7 @@
   "postInstall": [
     {
       "type": "markdown",
-      "content": "Open {{appUrl}} and sign in with any user name and the setup page password. Check that every setting is green, then click **Connect webhook**: it points your WhatsApp number at {{appUrl}}/webhook."
+      "content": "Open {{appUrl}} and sign in with any user name and the setup page password. The page (in Hebrew) walks you through creating a Meta app, checks each detail you paste with Meta, registers the number and connects the bot in one click each, and turns green when the first message arrives."
     },
     {
       "type": "markdown",

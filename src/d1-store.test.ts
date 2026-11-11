@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { getPlatformProxy } from "wrangler";
 import { type D1Database, D1ExpenseStore } from "./d1-store.ts";
+import { clearSettingsCache, SettingsStore } from "./settings.ts";
 
 // A real (local, in-memory) D1 from wrangler, with the production migrations applied.
 let db: D1Database;
@@ -12,7 +13,12 @@ before(async () => {
   const proxy = await getPlatformProxy<{ DB: D1Database }>({ persist: false });
   db = proxy.env.DB;
   dispose = proxy.dispose;
-  const schema = readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8")
+  const dir = new URL("../migrations/", import.meta.url);
+  const schema = readdirSync(dir)
+    .filter((name) => name.endsWith(".sql"))
+    .sort()
+    .map((name) => readFileSync(new URL(name, dir), "utf8"))
+    .join("\n")
     .replace(/--.*$/gm, "")
     .split(";")
     .map((s) => s.trim())
@@ -79,4 +85,31 @@ test("D1 store", async () => {
   assert.equal(await store.markProcessed("recent"), false, "recent record was kept");
   assert.equal(await store.getInvite("222222"), null);
   assert.notEqual(await store.getInvite("333333"), null);
+});
+
+test("settings store", async () => {
+  clearSettingsCache();
+  let now = 1_000;
+  const settings = new SettingsStore(db, () => now);
+  assert.deepEqual(await settings.all(), {});
+
+  await settings.save({ WHATSAPP_TOKEN: "a", ALLOWED_NUMBERS: "972500000001" });
+  await settings.save({ WHATSAPP_TOKEN: "b" });
+  assert.deepEqual(await settings.all(), { WHATSAPP_TOKEN: "b", ALLOWED_NUMBERS: "972500000001" });
+
+  // Saved settings win over the environment; an empty value removes the setting.
+  assert.deepEqual(await settings.effectiveEnv({ WHATSAPP_TOKEN: "env", TIMEZONE: "UTC" }), {
+    WHATSAPP_TOKEN: "b",
+    TIMEZONE: "UTC",
+    ALLOWED_NUMBERS: "972500000001",
+  });
+  await settings.save({ ALLOWED_NUMBERS: "" });
+  assert.deepEqual(await settings.all(), { WHATSAPP_TOKEN: "b" });
+
+  // Reads are cached for 30 seconds; `fresh` skips the cache.
+  await db.prepare("UPDATE settings SET value = 'c'").run();
+  now += 1_000;
+  assert.equal((await settings.all()).WHATSAPP_TOKEN, "b");
+  assert.equal((await settings.all(true)).WHATSAPP_TOKEN, "c");
+  clearSettingsCache();
 });

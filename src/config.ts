@@ -21,7 +21,7 @@ export function readEnv(env: Env, name: string): string | undefined {
 
 export function requireEnv(env: Env, name: string): string {
   const value = readEnv(env, name);
-  if (!value) throw new Error(`Missing required environment variable ${name} (see .env.example)`);
+  if (!value) throw new Error(`Missing required environment variable ${name} (see node.env.example)`);
   return value;
 }
 

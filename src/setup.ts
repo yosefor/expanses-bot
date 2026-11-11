@@ -1,172 +1,335 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { type Env, readEnv } from "./config.ts";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { type Env, parseNumbers, readEnv } from "./config.ts";
+import { escape, html, page } from "./html.ts";
+import { LAST_WEBHOOK_AT } from "./settings.ts";
 
 /**
- * Setup page at "/": checks the settings, the WhatsApp token and the webhook, and connects the
- * webhook with one click. Protected with HTTP Basic auth (any user name, password = ADMIN_PASSWORD).
- * Values are never shown, only whether they are set and whether Meta accepts them.
+ * Setup wizard at "/" (Hebrew): the owner pastes the Meta details into a form (saved in D1),
+ * each one is checked with Meta, and one click each registers the number and connects the webhook.
+ * Protected with HTTP Basic auth (any user name, password = ADMIN_PASSWORD).
+ * Secret values are never shown, only whether they are set and whether Meta accepts them.
  */
 
-const REQUIRED = [
-  ["WHATSAPP_TOKEN", "Permanent access token (System user with whatsapp_business_messaging)"],
-  ["WHATSAPP_PHONE_NUMBER_ID", "Phone number ID (WhatsApp → API Setup)"],
-  ["WHATSAPP_APP_SECRET", "App secret (App settings → Basic)"],
-  ["WHATSAPP_VERIFY_TOKEN", "Any random string, used when Meta verifies the webhook"],
-] as const;
-const OPTIONAL = [
-  ["WHATSAPP_BUSINESS_ACCOUNT_ID", "WhatsApp Business Account ID, lets this page subscribe the app to it"],
-  ["ALLOWED_NUMBERS", "Numbers allowed to use the bot. Empty = anyone"],
-  ["BOT_PHONE_NUMBER", "The bot's own number, for wa.me links in invites"],
-] as const;
+const TEXT_FIELDS = ["WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_BUSINESS_ACCOUNT_ID", "ALLOWED_NUMBERS"] as const;
+const SECRET_FIELDS = ["WHATSAPP_APP_SECRET", "WHATSAPP_TOKEN"] as const;
+const REQUIRED = ["WHATSAPP_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID"] as const;
 
 export interface SetupOptions {
+  /** The Worker environment with saved settings on top. */
   env: Env;
-  /** Tests replace it. */
+  /** Saves settings (D1). Without it the form is read-only. */
+  save?: (values: Record<string, string>) => Promise<void>;
+  /** Tests replace these. */
   fetch?: typeof fetch;
+  now?: () => number;
 }
 
 export async function handleSetup(request: Request, options: SetupOptions): Promise<Response> {
   const { env } = options;
   const password = readEnv(env, "ADMIN_PASSWORD");
   if (!password) {
-    return html(page("Expenses bot", `<p>The bot is running. Set the <code>ADMIN_PASSWORD</code> secret to open this setup page.</p>`));
+    return html(page("בוט ההוצאות", `<p>הבוט רץ. כדי לפתוח את דף ההגדרות, הגדירו את הסוד <code>ADMIN_PASSWORD</code> ב-Cloudflare.</p>`));
   }
   if (!isAuthorized(request.headers.get("authorization"), password)) {
-    return new Response("Sign in with any user name and the ADMIN_PASSWORD secret.", {
+    return new Response("Sign in with any user name and your bot's password (ADMIN_PASSWORD).", {
       status: 401,
       headers: { "WWW-Authenticate": 'Basic realm="Expenses bot setup", charset="UTF-8"' },
     });
   }
 
   const url = new URL(request.url);
-  const webhookUrl = `${url.origin}/webhook`;
+  const origin = url.origin;
   // Wrapped: Workers throws "Illegal invocation" when the global fetch is called as a method of another object.
   const graph = new Graph(env, options.fetch ?? ((input, init) => fetch(input, init)));
   let notice = "";
 
   if (request.method === "POST") {
     // Basic auth credentials are sent on cross-site form posts too, so only accept posts from this page.
-    if (request.headers.get("origin") !== url.origin) return new Response("Bad origin", { status: 403 });
+    if (request.headers.get("origin") !== origin) return new Response("Bad origin", { status: 403 });
     const form = await request.formData();
-    if (form.get("action") === "connect") notice = await connectWebhook(graph, env, webhookUrl);
+    const action = form.get("action");
+    if (action === "save") {
+      if (!options.save) return new Response("Saving is not available here", { status: 405 });
+      await saveSettings(form, env, graph, options.save);
+      return Response.redirect(`${origin}/?saved=1`, 303);
+    }
+    if (action === "register") notice = await registerNumber(graph, env, String(form.get("pin") ?? ""));
+    if (action === "connect") notice = await connectWebhook(graph, env, `${origin}/webhook`);
   } else if (request.method !== "GET") {
     return new Response(null, { status: 405 });
   }
+  if (url.searchParams.get("saved")) notice ||= message(true, "נשמר.");
 
-  return html(page("Expenses bot setup", notice + (await statusSections(graph, env, webhookUrl))));
+  return html(page("הגדרת בוט ההוצאות", notice + (await wizard(graph, env, origin, options))));
 }
 
-async function statusSections(graph: Graph, env: Env, webhookUrl: string): Promise<string> {
-  const missing = REQUIRED.filter(([name]) => !readEnv(env, name));
-  const settings = [...REQUIRED, ...OPTIONAL]
-    .map(([name, help]) => {
-      const set = readEnv(env, name) !== undefined;
-      const required = REQUIRED.some(([n]) => n === name);
-      return `<li>${mark(set, !required)} <code>${name}</code><br><small>${escape(help)}</small></li>`;
-    })
-    .join("");
+// ---------------------------------------------------------------------------------------------
+// Actions
 
-  let sections = `<section><h2>1. Settings</h2><ul>${settings}</ul>
-    <p><small>Change these in your Cloudflare dashboard: Workers → this Worker → Settings → Variables and Secrets
-    (or in Appflare's app settings).</small></p></section>`;
-
-  if (missing.length > 0) {
-    return `${sections}<section><h2>2. WhatsApp</h2><p>Fill in the required settings first.</p></section>`;
+async function saveSettings(form: FormData, env: Env, graph: Graph, save: (values: Record<string, string>) => Promise<void>) {
+  const values: Record<string, string> = {};
+  for (const name of TEXT_FIELDS) values[name] = String(form.get(name) ?? "").trim();
+  values.ALLOWED_NUMBERS = [...parseNumbers(values.ALLOWED_NUMBERS?.replace(/(^|,)\s*0/g, "$1972"))].join(",");
+  // Empty secret fields keep the saved value.
+  for (const name of SECRET_FIELDS) {
+    const value = String(form.get(name) ?? "").trim();
+    if (value) values[name] = value;
   }
+  if (!readEnv(env, "WHATSAPP_VERIFY_TOKEN")) values.WHATSAPP_VERIFY_TOKEN = randomBytes(16).toString("hex");
 
-  const phoneId = readEnv(env, "WHATSAPP_PHONE_NUMBER_ID")!;
-  const phone = await graph.get<{ display_phone_number?: string; verified_name?: string; quality_rating?: string }>(
-    `${phoneId}?fields=display_phone_number,verified_name,quality_rating`,
-  );
-  sections += `<section><h2>2. WhatsApp number</h2>${
-    phone.ok
-      ? `<p>${mark(true)} ${escape(phone.data.verified_name ?? "")} <code>${escape(phone.data.display_phone_number ?? "")}</code>
-         (quality: ${escape(phone.data.quality_rating ?? "unknown")})</p>`
-      : `<p>${mark(false)} Meta rejected the token or the phone number ID: ${escape(phone.error)}</p>`
-  }</section>`;
-  if (!phone.ok) return sections;
-
-  const config = await graph.get<{ webhook_configuration?: Record<string, string> }>(`${phoneId}?fields=webhook_configuration`);
-  const levels = config.ok ? (config.data.webhook_configuration ?? {}) : {};
-  const targets = Object.entries(levels);
-  // Meta uses the most specific override: phone number, then business account, then the app.
-  const active = levels.phone_number ?? levels.whatsapp_business_account ?? levels.application;
-  const connected = active === webhookUrl;
-  const list = targets
-    .map(([level, target]) => `<li><code>${escape(level)}</code>: <code>${escape(target)}</code>${target === webhookUrl ? " (this bot)" : ""}</li>`)
-    .join("");
-  sections += `<section><h2>3. Webhook</h2>
-    <p>${mark(connected)} ${connected ? "Messages to this number reach the bot." : "Messages to this number don't reach the bot yet."}</p>
-    ${config.ok ? (list ? `<ul>${list}</ul>` : "") : `<p><small>Could not read the webhook settings: ${escape(config.error)}</small></p>`}
-    <p>Bot webhook: <code>${escape(webhookUrl)}</code></p>
-    <form method="post"><input type="hidden" name="action" value="connect">
-    <button>${connected ? "Reconnect" : "Connect"} webhook</button></form>
-    <p><small>Points this phone number (only this one) at the bot.${
-      readEnv(env, "WHATSAPP_BUSINESS_ACCOUNT_ID") ? " Also subscribes your Meta app to the business account." : ""
-    }</small></p></section>`;
-
-  const bot = readEnv(env, "BOT_PHONE_NUMBER")?.replace(/\D/g, "");
-  if (connected && bot) {
-    sections += `<section><h2>4. Try it</h2><p><a href="https://wa.me/${bot}?text=${encodeURIComponent("עזרה")}">Message the bot</a>
-      and send <code>עזרה</code>.</p></section>`;
+  // The bot's own number (for wa.me links in invites) comes from Meta.
+  const next = new Graph({ ...env, ...values }, graph.fetchImpl);
+  const phoneId = values.WHATSAPP_PHONE_NUMBER_ID;
+  if (phoneId) {
+    const phone = await next.get<{ display_phone_number?: string }>(`${phoneId}?fields=display_phone_number`);
+    if (phone.ok && phone.data.display_phone_number) values.BOT_PHONE_NUMBER = phone.data.display_phone_number.replace(/\D/g, "");
   }
-  return sections;
+  await save(values);
+}
+
+async function registerNumber(graph: Graph, env: Env, pin: string): Promise<string> {
+  const phoneId = readEnv(env, "WHATSAPP_PHONE_NUMBER_ID");
+  if (!phoneId) return message(false, "קודם ממלאים את הפרטים בשלב 1.");
+  if (!/^\d{6}$/.test(pin.trim())) return message(false, "הקוד צריך להיות 6 ספרות.");
+  const result = await graph.post(`${phoneId}/register`, { messaging_product: "whatsapp", pin: pin.trim() });
+  return result.ok ? message(true, "המספר הופעל.") : message(false, `Meta לא הפעילה את המספר: ${result.error}`);
 }
 
 async function connectWebhook(graph: Graph, env: Env, webhookUrl: string): Promise<string> {
   const phoneId = readEnv(env, "WHATSAPP_PHONE_NUMBER_ID");
   const verifyToken = readEnv(env, "WHATSAPP_VERIFY_TOKEN");
-  if (!phoneId || !verifyToken || !readEnv(env, "WHATSAPP_TOKEN")) return notice(false, "Fill in the required settings first.");
+  const secret = readEnv(env, "WHATSAPP_APP_SECRET");
+  if (!phoneId || !verifyToken || !secret || !readEnv(env, "WHATSAPP_TOKEN")) return message(false, "קודם ממלאים את הפרטים בשלב 1.");
 
+  const app = await graph.get<{ id?: string }>("app");
+  if (!app.ok || !app.data.id) return message(false, `Meta לא מכירה את הטוקן: ${app.ok ? "no app" : app.error}`);
+  const appToken = `${app.data.id}|${secret}`;
+
+  // 1. A new app has no WhatsApp webhook yet: point the app's webhook at the bot.
+  //    An app that already has one (shared with other services) keeps it, and only this number is redirected (step 3).
+  const subs = await graph.get<{ data?: { object?: string; callback_url?: string }[] }>(`${app.data.id}/subscriptions`, appToken);
+  if (!subs.ok) return message(false, `ה-App secret לא נכון: ${subs.error}`);
+  const existing = (subs.data.data ?? []).find((s) => s.object === "whatsapp_business_account");
+  if (!existing) {
+    const created = await graph.post(
+      `${app.data.id}/subscriptions`,
+      { object: "whatsapp_business_account", callback_url: webhookUrl, verify_token: verifyToken, fields: "messages" },
+      appToken,
+    );
+    if (!created.ok) return message(false, `Meta סירבה לחבר את הבוט: ${created.error}`);
+  }
+
+  // 2. Subscribe the app to the business account, only when it isn't subscribed yet: re-posting to
+  //    subscribed_apps on an account that other services share could reset its account-level webhook.
   const waba = readEnv(env, "WHATSAPP_BUSINESS_ACCOUNT_ID");
   if (waba) {
-    // Subscribe only when the app isn't subscribed yet: re-posting to subscribed_apps on an account
-    // that other services share could reset its account-level webhook.
-    const [app, apps] = await Promise.all([
-      graph.get<{ id?: string }>("app"),
-      graph.get<{ data?: { whatsapp_business_api_data?: { id?: string } }[] }>(`${waba}/subscribed_apps`),
-    ]);
-    const appId = app.ok ? app.data.id : undefined;
-    const already = apps.ok && appId !== undefined && (apps.data.data ?? []).some((a) => a.whatsapp_business_api_data?.id === appId);
-    if (appId && apps.ok && !already) {
+    const apps = await graph.get<{ data?: { whatsapp_business_api_data?: { id?: string } }[] }>(`${waba}/subscribed_apps`);
+    const already = apps.ok && (apps.data.data ?? []).some((a) => a.whatsapp_business_api_data?.id === app.data.id);
+    if (apps.ok && !already) {
       const subscribed = await graph.post(`${waba}/subscribed_apps`, {});
-      if (!subscribed.ok) return notice(false, `Could not subscribe the app to the business account: ${subscribed.error}`);
+      if (!subscribed.ok) return message(false, `לא הצלחתי לחבר את האפליקציה לחשבון ה-WhatsApp: ${subscribed.error}`);
     }
   }
-  // Meta calls the webhook (GET with the verify token) before it accepts the override.
-  const result = await graph.post(phoneId, {
-    webhook_configuration: { override_callback_uri: webhookUrl, verify_token: verifyToken },
-  });
-  return result.ok ? notice(true, "Webhook connected.") : notice(false, `Meta refused the webhook: ${result.error}`);
+
+  // 3. If messages to this number still go somewhere else, redirect only this number.
+  const config = await graph.get<{ webhook_configuration?: Record<string, string> }>(`${phoneId}?fields=webhook_configuration`);
+  if (!config.ok || activeWebhook(config.data.webhook_configuration) !== webhookUrl) {
+    // Meta calls the webhook (GET with the verify token) before it accepts the override.
+    const result = await graph.post(phoneId, { webhook_configuration: { override_callback_uri: webhookUrl, verify_token: verifyToken } });
+    if (!result.ok) return message(false, `Meta סירבה לחבר את הבוט: ${result.error}`);
+  }
+  return message(true, "הבוט מחובר ל-WhatsApp.");
 }
+
+/** Meta uses the most specific webhook: phone number, then business account, then the app. */
+function activeWebhook(levels: Record<string, string> | undefined): string | undefined {
+  return levels?.phone_number ?? levels?.whatsapp_business_account ?? levels?.application;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The wizard
+
+interface Phone {
+  display_phone_number?: string;
+  verified_name?: string;
+  quality_rating?: string;
+  platform_type?: string;
+  status?: string;
+  code_verification_status?: string;
+}
+
+async function wizard(graph: Graph, env: Env, origin: string, options: SetupOptions): Promise<string> {
+  const webhookUrl = `${origin}/webhook`;
+  const phoneId = readEnv(env, "WHATSAPP_PHONE_NUMBER_ID");
+  const waba = readEnv(env, "WHATSAPP_BUSINESS_ACCOUNT_ID");
+  const secret = readEnv(env, "WHATSAPP_APP_SECRET");
+  const filled = REQUIRED.every((name) => readEnv(env, name));
+
+  // Ask Meta about everything that is filled in.
+  const app = readEnv(env, "WHATSAPP_TOKEN") ? await graph.get<{ id?: string; name?: string }>("app") : undefined;
+  const appId = app?.ok ? app.data.id : undefined;
+  const [subs, phone, account, config] = await Promise.all([
+    appId && secret ? graph.get(`${appId}/subscriptions`, `${appId}|${secret}`) : undefined,
+    phoneId && app?.ok
+      ? graph.get<Phone>(`${phoneId}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,code_verification_status`)
+      : undefined,
+    waba && app?.ok ? graph.get<{ name?: string }>(`${waba}?fields=name`) : undefined,
+    phoneId && app?.ok ? graph.get<{ webhook_configuration?: Record<string, string> }>(`${phoneId}?fields=webhook_configuration`) : undefined,
+  ]);
+
+  // Step 1: details
+  const checks = [
+    check("טוקן", !!readEnv(env, "WHATSAPP_TOKEN"), app, app?.ok ? `אפליקציה: ${app.data.name ?? app.data.id}` : undefined),
+    check("App secret", !!secret, subs, "תקין"),
+    check("מספר הטלפון", !!phoneId, phone, phone?.ok ? `${phone.data.verified_name ?? ""} ${phone.data.display_phone_number ?? ""}` : undefined),
+    check("חשבון WhatsApp Business", !!waba, account, account?.ok ? (account.data.name ?? "") : undefined, true),
+  ].join("");
+  const step1Done = filled && !!app?.ok && !!subs?.ok && !!phone?.ok;
+  const allowed = readEnv(env, "ALLOWED_NUMBERS");
+  const form = options.save
+    ? `<form method="post"><input type="hidden" name="action" value="save">
+      ${input("WHATSAPP_PHONE_NUMBER_ID", "Phone number ID", env)}
+      ${input("WHATSAPP_BUSINESS_ACCOUNT_ID", "WhatsApp Business Account ID", env)}
+      ${secretInput("WHATSAPP_APP_SECRET", "App secret", env)}
+      ${secretInput("WHATSAPP_TOKEN", "טוקן קבוע (Access token)", env)}
+      <label for="ALLOWED_NUMBERS">מי יכול להשתמש בבוט</label>
+      <input id="ALLOWED_NUMBERS" name="ALLOWED_NUMBERS" class="ltr" placeholder="050-1234567, 052-7654321" value="${escape(allowed ?? "")}">
+      <small>המספרים שלכם ושל בני המשפחה, מופרדים בפסיק. מי שמצטרף עם קוד הזמנה מורשה גם הוא.
+      ${allowed ? "" : '<span class="bad">כרגע ריק: כל מי שישלח הודעה לבוט יוכל להשתמש בו.</span>'}</small><br>
+      <button>שמירה ובדיקה</button></form>`
+    : `<p class="muted">את הפרטים האלה משנים ב-Cloudflare: Workers ← הבוט ← Settings ← Variables and Secrets.</p>`;
+  let out = section(1, "פרטי החיבור מ-Meta", step1Done, `<ul>${checks}</ul>${form}${META_GUIDE}`);
+
+  // Step 2: register the number
+  const p = phone?.ok ? phone.data : undefined;
+  const registered = p?.platform_type === "CLOUD_API" && p.status === "CONNECTED";
+  out += section(
+    2,
+    "הפעלת המספר",
+    registered,
+    registered
+      ? `<p>המספר פעיל (דירוג איכות: ${escape(p?.quality_rating ?? "לא ידוע")}).</p>`
+      : !step1Done
+        ? `<p class="muted">אחרי שלב 1.</p>`
+        : `<p>בחרו קוד סודי בן 6 ספרות. זה קוד האימות הדו-שלבי של המספר. שמרו אותו, Meta תבקש אותו אם תעבירו את המספר.</p>
+          ${p?.code_verification_status && p.code_verification_status !== "VERIFIED" && p.code_verification_status !== "EXPIRED" ? '<p class="bad">קודם צריך לאמת את המספר ב-Meta (בקוד SMS או בשיחה), ב-WhatsApp ← API Setup.</p>' : ""}
+          <form method="post"><input type="hidden" name="action" value="register">
+          <label for="pin">קוד בן 6 ספרות</label><input id="pin" name="pin" class="ltr" inputmode="numeric" pattern="\\d{6}" maxlength="6" required>
+          <button>הפעלת המספר</button></form>`,
+  );
+
+  // Step 3: webhook
+  const active = config?.ok ? activeWebhook(config.data.webhook_configuration) : undefined;
+  const connected = active === webhookUrl;
+  out += section(
+    3,
+    "חיבור הבוט ל-WhatsApp",
+    connected,
+    !step1Done
+      ? `<p class="muted">אחרי שלב 1.</p>`
+      : `<p>${connected ? "הודעות למספר מגיעות לבוט." : "הודעות למספר עוד לא מגיעות לבוט."}</p>
+        <form method="post"><input type="hidden" name="action" value="connect"><button>${connected ? "חיבור מחדש" : "חיבור"}</button></form>
+        <details><summary>פרטים טכניים</summary><p>כתובת הבוט: <code>${escape(webhookUrl)}</code></p>
+        ${active ? `<p>ההודעות מגיעות עכשיו אל: <code>${escape(active)}</code></p>` : ""}</details>`,
+  );
+
+  // Step 4: live mode. Messages from real numbers only arrive once the app is Live.
+  const lastWebhook = Number(readEnv(env, LAST_WEBHOOK_AT) ?? 0);
+  const appSettings = appId ? `https://developers.facebook.com/apps/${encodeURIComponent(appId)}/settings/basic/` : "https://developers.facebook.com/apps";
+  out += section(
+    4,
+    "העברת האפליקציה למצב Live",
+    lastWebhook > 0,
+    `<p>Meta מעבירה לבוט הודעות אמיתיות רק כשהאפליקציה במצב Live.</p>
+    <ol><li>פתחו את <a href="${appSettings}" target="_blank" rel="noopener">הגדרות האפליקציה (App settings ← Basic)</a>.</li>
+    <li>בשדה <b>Privacy Policy URL</b> הדביקו: <code>${escape(origin)}/privacy</code>, ולמטה <b>Save changes</b>.</li>
+    <li>בראש הדף, העבירו את <b>App Mode</b> ל-<b>Live</b>.</li></ol>`,
+  );
+
+  // Step 5: test
+  const bot = readEnv(env, "BOT_PHONE_NUMBER")?.replace(/\D/g, "");
+  const when = lastWebhook > 0 ? formatTime(lastWebhook, readEnv(env, "TIMEZONE") ?? "Asia/Jerusalem") : "";
+  out += section(
+    5,
+    "בדיקה",
+    lastWebhook > 0,
+    `${bot ? `<p><a class="button big" href="https://wa.me/${bot}?text=${encodeURIComponent("עזרה")}" target="_blank" rel="noopener">שליחת ״עזרה״ לבוט</a></p>` : ""}
+    <p>${lastWebhook > 0 ? `✓ הבוט קיבל הודעה ב-${escape(when)}. מוכן לשימוש!` : "שלחו לבוט ״עזרה״ מהוואטסאפ שלכם, ורעננו את הדף."}</p>
+    <p class="muted">אם הבוט לא עונה: בדקו ששלבים 1–4 מסומנים, ושהמספר שלכם ברשימת ״מי יכול להשתמש בבוט״.</p>`,
+  );
+  return out;
+}
+
+const META_GUIDE = `<details><summary>איך משיגים את הפרטים? (מדריך)</summary><ol>
+<li>היכנסו ל-<a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com</a> עם חשבון הפייסבוק שלכם. אם מבקשים, הירשמו כמפתחים (Get started).</li>
+<li><b>Create app</b> ← בחרו <b>Connect with customers through WhatsApp</b> ← תנו שם (למשל ״בוט הוצאות״) ← בחרו או צרו Business portfolio ← <b>Create app</b>.</li>
+<li>בתפריט: <b>WhatsApp ← API Setup</b>. למטה: <b>Add phone number</b>. מלאו שם תצוגה ואת מספר הטלפון של הבוט, ואמתו אותו בקוד שיגיע ב-SMS או בשיחה. המספר לא יכול להיות מחובר לוואטסאפ רגיל.</li>
+<li>באותו דף, בחרו את המספר החדש ב-<b>From</b>, והעתיקו לטופס את <b>Phone number ID</b> ואת <b>WhatsApp Business Account ID</b>.</li>
+<li><b>App settings ← Basic</b>: ליד <b>App secret</b> לחצו <b>Show</b> והעתיקו.</li>
+<li>טוקן קבוע: <a href="https://business.facebook.com/settings/system-users" target="_blank" rel="noopener">business.facebook.com ← Settings ← System users</a> ← <b>Add</b> (שם כלשהו, תפקיד Admin) ← <b>Assign assets</b>: את האפליקציה ואת חשבון ה-WhatsApp, עם Full control ← <b>Generate token</b>: בחרו את האפליקציה, תוקף <b>Never</b>, והרשאות <code>whatsapp_business_messaging</code> ו-<code>whatsapp_business_management</code>. העתיקו את הטוקן.</li>
+</ol><p class="muted">הבוט רק עונה להודעות שנשלחות אליו, ותשובות כאלה לא עולות כסף ב-WhatsApp.</p></details>`;
+
+function section(n: number, title: string, done: boolean, body: string): string {
+  return `<section${done ? ' class="done"' : ""}><h2>${done ? '<span class="ok">✓</span>' : `<span class="muted">${n}.</span>`} ${escape(title)}</h2>${body}</section>`;
+}
+
+/** `set`: the value is filled in. Without a result it could not be checked yet (the token is missing or wrong). */
+function check<T>(label: string, set: boolean, result: GraphResult<T> | undefined, okText?: string, optional = false): string {
+  if (!result && set) return `<li><span class="opt">–</span> ${escape(label)}: <span class="muted">ייבדק כשהטוקן יתקבל</span></li>`;
+  if (!result) return `<li>${optional ? '<span class="opt">–</span>' : '<span class="bad">✗</span>'} ${escape(label)}: <span class="muted">חסר</span></li>`;
+  return result.ok
+    ? `<li><span class="ok">✓</span> ${escape(label)}: ${escape(okText ?? "")}</li>`
+    : `<li><span class="bad">✗</span> ${escape(label)}: Meta לא מקבלת: <small>${escape(result.error)}</small></li>`;
+}
+
+function input(name: string, label: string, env: Env): string {
+  return `<label for="${name}">${escape(label)}</label><input id="${name}" name="${name}" class="ltr" inputmode="numeric" value="${escape(readEnv(env, name) ?? "")}">`;
+}
+
+function secretInput(name: string, label: string, env: Env): string {
+  const set = readEnv(env, name) !== undefined;
+  return `<label for="${name}">${escape(label)}</label><input id="${name}" name="${name}" type="password" class="ltr" autocomplete="off" placeholder="${set ? "שמור ✓ (השאירו ריק כדי לא לשנות)" : ""}">`;
+}
+
+function message(ok: boolean, text: string): string {
+  return `<p class="notice ${ok ? "ok" : "bad"}">${escape(text)}</p>`;
+}
+
+function formatTime(ms: number, timeZone: string): string {
+  return new Intl.DateTimeFormat("he-IL", { timeZone, dateStyle: "short", timeStyle: "short" }).format(ms);
+}
+
+// ---------------------------------------------------------------------------------------------
 
 type GraphResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
 class Graph {
   #base: string;
   #token: string;
-  #fetch: typeof fetch;
+  fetchImpl: typeof fetch;
 
   constructor(env: Env, fetchImpl: typeof fetch) {
     this.#base = `https://graph.facebook.com/${readEnv(env, "GRAPH_API_VERSION") ?? "v23.0"}/`;
     this.#token = readEnv(env, "WHATSAPP_TOKEN") ?? "";
-    this.#fetch = fetchImpl;
+    this.fetchImpl = fetchImpl;
   }
 
-  get<T>(path: string): Promise<GraphResult<T>> {
-    return this.#call<T>(path, { method: "GET" });
+  /** `appToken` ("<app id>|<app secret>") replaces the user token for app-level calls. */
+  get<T>(path: string, appToken?: string): Promise<GraphResult<T>> {
+    return this.#call<T>(path, { method: "GET" }, appToken);
   }
 
-  post<T>(path: string, body: unknown): Promise<GraphResult<T>> {
-    return this.#call<T>(path, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
+  post<T>(path: string, body: unknown, appToken?: string): Promise<GraphResult<T>> {
+    return this.#call<T>(path, { method: "POST", body: JSON.stringify(body) }, appToken);
   }
 
-  async #call<T>(path: string, init: RequestInit): Promise<GraphResult<T>> {
+  async #call<T>(path: string, init: RequestInit, appToken?: string): Promise<GraphResult<T>> {
     try {
-      const response = await this.#fetch(this.#base + path, {
-        ...init,
-        headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${this.#token}` },
-      });
+      const url = new URL(this.#base + path);
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (appToken) url.searchParams.set("access_token", appToken);
+      else headers.Authorization = `Bearer ${this.#token}`;
+      const response = await this.fetchImpl(url, { ...init, headers });
       const data = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
       if (!response.ok) return { ok: false, error: data.error?.message ?? `HTTP ${response.status}` };
       return { ok: true, data };
@@ -183,44 +346,4 @@ function isAuthorized(header: string | null, password: string): boolean {
   // Compare hashes so the lengths always match.
   const hash = (value: string) => createHash("sha256").update(value).digest();
   return timingSafeEqual(hash(given), hash(password));
-}
-
-function mark(ok: boolean, optional = false): string {
-  return ok ? '<span class="ok">✓</span>' : optional ? '<span class="opt">–</span>' : '<span class="bad">✗</span>';
-}
-
-function notice(ok: boolean, text: string): string {
-  return `<p class="notice ${ok ? "ok" : "bad"}">${escape(text)}</p>`;
-}
-
-function escape(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-}
-
-function html(body: string): Response {
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
-      "X-Frame-Options": "DENY",
-    },
-  });
-}
-
-function page(title: string, content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)}</title>
-<style>
-:root{color-scheme:light dark;--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--card:#fff;--line:#e7e5e4;--ok:#15803d;--bad:#b91c1c;--accent:#0f766e}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;--card:#292524;--line:#44403c;--ok:#4ade80;--bad:#f87171;--accent:#2dd4bf}}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
-main{max-width:640px;margin:0 auto;padding:24px 16px}
-section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 16px 12px;margin:16px 0}
-h1{font-size:1.4rem}h2{font-size:1.05rem}ul{padding-left:0;list-style:none}li{margin:8px 0}
-small{color:var(--muted)}code{font-size:.9em;word-break:break-all}
-.ok{color:var(--ok)}.bad{color:var(--bad)}.opt{color:var(--muted)}
-.notice{font-weight:600}a{color:var(--accent)}
-button{font:inherit;padding:8px 16px;border-radius:8px;border:0;background:var(--accent);color:var(--bg);cursor:pointer}
-</style></head><body><main><h1>${escape(title)}</h1>${content}</main></body></html>`;
 }

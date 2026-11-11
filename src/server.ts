@@ -27,6 +27,13 @@ export function isValidSignature(rawBody: Buffer, header: string | null, appSecr
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
+/** Meta's webhook verification: GET with hub.verify_token, answered with hub.challenge. */
+export function verifyHandshake(request: Request, verifyToken: string | undefined): Response {
+  const params = new URL(request.url).searchParams;
+  const ok = !!verifyToken && params.get("hub.mode") === "subscribe" && params.get("hub.verify_token") === verifyToken;
+  return ok ? new Response(params.get("hub.challenge") ?? "") : new Response("Forbidden", { status: 403 });
+}
+
 /**
  * WhatsApp Cloud API webhook as a standard fetch handler (works on Vercel, Node, anything).
  * GET = Meta's verification handshake, POST = incoming messages.
@@ -34,11 +41,7 @@ export function isValidSignature(rawBody: Buffer, header: string | null, appSecr
 export async function handleWebhook(request: Request, options: WebhookOptions, waitUntil: WaitUntil): Promise<Response> {
   const log = options.log ?? console.log;
 
-  if (request.method === "GET") {
-    const params = new URL(request.url).searchParams;
-    const ok = params.get("hub.mode") === "subscribe" && params.get("hub.verify_token") === options.verifyToken;
-    return ok ? new Response(params.get("hub.challenge") ?? "") : new Response("Forbidden", { status: 403 });
-  }
+  if (request.method === "GET") return verifyHandshake(request, options.verifyToken);
 
   if (request.method !== "POST") return new Response(null, { status: 405 });
 

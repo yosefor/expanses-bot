@@ -19,7 +19,6 @@
     "GRAPH_API_VERSION": "v23.0",
     "REACTION_EMOJI": "✅"
   },
-  "secrets": {
-    "required": ["WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "ADMIN_PASSWORD"]
-  }
+  // Everything else is entered on the setup page (stored in D1), or set as Worker variables.
+  "secrets": { "required": ["ADMIN_PASSWORD"] }
 }

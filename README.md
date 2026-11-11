@@ -33,27 +33,37 @@ Node (Vercel, Docker, Cloud Run) with Firestore.
 
 ## Setup
 
-1. **Meta app**: at https://developers.facebook.com, create an app and add the **WhatsApp** product.
-   - Copy the **Phone number ID** and the **WhatsApp Business Account ID** from *WhatsApp → API Setup*.
-   - Create a **permanent token**: *Business Settings → System users*, then generate a token with
-     `whatsapp_business_messaging` and `whatsapp_business_management`.
-   - Copy the **App secret** from *App settings → Basic*.
-2. Deploy (below) and fill in the settings.
-3. Open the Worker's URL (`/`), sign in with any user name and `ADMIN_PASSWORD`, and click
-   **Connect webhook**. The setup page checks every setting and the token, then points this phone
-   number (only this one, with a phone-number-level override) at `/webhook`.
-4. Send the bot `עזרה`.
+**Not technical?** Open the install page, which walks through everything in Hebrew:
+https://expenses-bot.yosefschwartz.workers.dev/install
+
+1. Click **Deploy to Cloudflare** above. It asks only for `ADMIN_PASSWORD`, a password for the
+   bot's setup page.
+2. Open the Worker's address (`https://expenses-bot.<you>.workers.dev`) and sign in with any user
+   name and that password. The setup page (in Hebrew) walks through the rest and checks each step
+   with Meta:
+   1. **Meta details**: Phone number ID, WhatsApp Business Account ID, App secret and a permanent
+      token (a guide on the page shows where each one is), plus the numbers allowed to use the bot.
+      They are saved in D1 and override Worker variables.
+   2. **Register the number** with a 6-digit PIN, when Meta hasn't yet.
+   3. **Connect**: on a new Meta app, points the app's WhatsApp webhook at the bot. On an app whose
+      webhook already goes elsewhere (shared with other services), it leaves that alone and redirects
+      only this number (a phone-number-level override).
+   4. **Live mode**: Meta only delivers real messages once the app is Live, which needs a privacy
+      policy URL. The bot serves one at `/privacy`.
+   5. **Test**: turns green when the first message arrives.
+
+Settings can also be Worker variables or secrets instead (the page's values win when both are set):
 
 | Setting | |
 |---|---|
-| `WHATSAPP_TOKEN` | Permanent access token (secret) |
-| `WHATSAPP_PHONE_NUMBER_ID` | Phone number ID |
-| `WHATSAPP_APP_SECRET` | App secret, verifies webhook signatures (secret) |
-| `WHATSAPP_VERIFY_TOKEN` | Any random string. Meta sends it back when verifying the webhook |
 | `ADMIN_PASSWORD` | Password for the setup page. Without it the page stays closed |
-| `WHATSAPP_BUSINESS_ACCOUNT_ID` | Optional. Lets the setup page subscribe the app to the account |
+| `WHATSAPP_TOKEN` | Permanent access token (System user with `whatsapp_business_messaging` and `whatsapp_business_management`) |
+| `WHATSAPP_PHONE_NUMBER_ID` | Phone number ID |
+| `WHATSAPP_APP_SECRET` | App secret, verifies webhook signatures |
+| `WHATSAPP_VERIFY_TOKEN` | Any random string. The setup page makes one |
+| `WHATSAPP_BUSINESS_ACCOUNT_ID` | Lets the setup page subscribe the app to the account |
 | `ALLOWED_NUMBERS` | Comma-separated numbers allowed to use the bot (e.g. `972501234567`). Empty = anyone |
-| `BOT_PHONE_NUMBER` | Optional. The bot's number, digits only, for `wa.me` links in invites |
+| `BOT_PHONE_NUMBER` | The bot's number, for `wa.me` links in invites. The setup page fills it in |
 | `TIMEZONE` | Default `Asia/Jerusalem` |
 
 ## Deploy (Cloudflare Workers)
@@ -69,10 +79,11 @@ npx wrangler deploy --secrets-file .dev.vars && npx wrangler d1 migrations apply
 npm run deploy
 ```
 
-- `src/worker.ts` is the entry point: `/webhook` for Meta, `/` for the setup page, and a daily cron
-  that deletes old dedupe records and expired invite codes.
+- `src/worker.ts` is the entry point: `/webhook` for Meta, `/` for the setup page, `/install` (a guide
+  to send to someone who wants their own copy), `/privacy`, and a daily cron that deletes old dedupe
+  records and expired invite codes.
 - Data lives in D1. The schema is in `migrations/`: `expenses`, `links` (number → shared account),
-  `invites` and `processed_messages` (dedupes webhook retries).
+  `invites`, `processed_messages` (dedupes webhook retries) and `settings` (from the setup page).
 - Settings changed in the Cloudflare dashboard survive redeploys (`keep_vars`).
 - Local: `cp .dev.vars.example .dev.vars`, then `npm run dev:worker`.
 - `appflare/appflare.jsonc` is a draft entry for the [Appflare](https://appflare.dev) catalog.
@@ -93,7 +104,7 @@ Expenses saved before shared accounts existed have no `sender`. The account owne
 The Admin SDK bypasses security rules, so `firestore.rules` blocks all client access
 (`firebase deploy --only firestore:rules`).
 
-1. `cp .env.example .env` and fill in the values, plus `FIREBASE_PROJECT_ID` (Firestore enabled).
+1. `cp node.env.example .env` and fill in the values, plus `FIREBASE_PROJECT_ID` (Firestore enabled).
    Locally, credentials come from `GOOGLE_APPLICATION_CREDENTIALS` (a service account key file).
 2. `npm install && npm start`. To reach it from Meta locally, use a tunnel, e.g.
    `cloudflared tunnel --url http://localhost:8080`.
